@@ -1,0 +1,16 @@
+// Workflow
+digraph {
+	input1 [label="Input
+(input1)"]
+	add1 [label="Add
+(add1)"]
+	multi1 [label="Multiply
+(multi1)"]
+	output1 [label="Output
+(output1)"]
+	input1 -> add1 [label="value -> add1"]
+	input1 -> add1 [label="value -> add2"]
+	add1 -> multi1 [label="sum -> multi1"]
+	input1 -> multi1 [label="value -> multi2"]
+	multi1 -> output1 [label="product -> value"]
+}
