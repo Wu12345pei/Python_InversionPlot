@@ -109,12 +109,19 @@ class OutputApparentResistivityNode(MTBaseNode):
     def __init__(self, node_id: str, label: str):
         super().__init__(node_id, label)
         self.add_input_port('Processor', MTProcessor)
+        self.site_index = 0
     def execute(self, inputs: Dict[str, any]) -> Dict[str, any]:
         MTP = inputs['Processor']
-        MTP.plot_resistivity_of_one_site(2)
+        MTP.plot_resistivity_of_one_site(self.site_index)
+        self.MTP = MTP
         self.restorefigure = MTP.fig
         print('fig success')
         return {'Processor': MTP}
+    def execute_and_emit(self):
+        self.MTP.plot_resistivity_of_one_site(self.site_index)
+        self.restorefigure = self.MTP.fig
+        print('fig success')
+        self.finished.emit()
 
 
 ## 4.测试

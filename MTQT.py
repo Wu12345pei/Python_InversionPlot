@@ -1,18 +1,36 @@
 from Qt import QtCore, QtWidgets, QtGui
+import os
 from plotly.offline import plot
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from NodeGraphQt import BaseNode, NodeBaseWidget, NodeGraph
 from MTP2Node import *
 from Menu import *
-from CustomMessageBox import CustomMessageBox
+from ExtraWidget.CustomMessageBox import CustomMessageBox
 from functools import partial
-
+from ChatwithAI import Langchainchat
 ############################################################################################################
+class ChatWorker(QtCore.QObject):
+    finished = QtCore.Signal()  # 线程完成信号
+    result_ready = QtCore.Signal(str)  # 返回结果信号
+
+    def __init__(self, langchainchat):
+        super(ChatWorker, self).__init__()
+        self.langchainchat = langchainchat
+
+    def run(self):
+        """
+        在工作线程中运行 chat 方法
+        """
+        result = self.langchainchat.chat()  # 调用耗时操作
+        self.result_ready.emit(result)  # 发出结果信号
+        self.finished.emit()  # 发出完成信号
+
 ## 创建Nodegraph子类，添加connectionmgr和workflowengine
 class NodeGraphMT(NodeGraph):
     def __init__(self):
         super(NodeGraphMT, self).__init__()
         self.connectionmgr = ConnectionManager()
+        self.langchainchat = Langchainchat()
 
     def add_connection(self, start_node, start_port, end_node, end_port):
         successful = self.connectionmgr.add_connection(start_node, start_port, end_node, end_port)
@@ -24,6 +42,9 @@ class NodeGraphMT(NodeGraph):
     
     def remove_nodes(self, nodes):
         for node in nodes:
+            # 如果节点有webengineview，删除
+            if hasattr(node, 'plotbrowser') and node.plotbrowser:
+                node.plotbrowser.deleteLater()
             self.delete_node(node)
 
     def run_workflow(self):
@@ -32,6 +53,65 @@ class NodeGraphMT(NodeGraph):
         order = workflow.prepare_execution()
         print(order)
         workflow.execute()
+    
+    def chat_with_ai(self, prompt):
+        """
+        在单独的线程中运行 chat_with_ai
+        """
+        self.langchainchat.set_human_prompt(prompt)
+
+        # 创建线程
+        self.thread = QtCore.QThread()
+        self.worker = ChatWorker(self.langchainchat)  # 将 langchainchat 传递给工作线程
+        self.worker.moveToThread(self.thread)
+
+        # 连接信号和槽
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        # 处理结果
+        self.worker.result_ready.connect(self.get_nodes_from_result)
+
+        # 启动线程
+        self.thread.start()
+
+    def get_nodes_from_result(self, result):
+        """
+        处理 AI 返回的结果
+        """
+        nodes = []
+        if 'input_file' in result:
+            nodes.append('InputFileNode.InputFileNodeUI')
+        if 'cal_PhaseTensor' in result:
+            nodes.append('PhaseTensorNode.PhaseTensorNodeUI')
+        if 'cal_Apr' in result:
+            nodes.append('ApparentResistivityNode.ApparentResistivityNodeUI')
+        if 'cal_UnpackData' in result:
+            nodes.append('UnpackDataNode.UnpackDataNodeUI')
+        if 'output_Key' in result:
+            nodes.append('OutputNode.OutputNodeUI')
+        if 'output_Aprplot' in result:
+            nodes.append('OutputResistivityPlotNode.OutputResistivityPlotNodeUI')
+        print(nodes)
+        self.chatbox.add_node_buttons(nodes)
+        self.chatbox.node_selected.connect(lambda node: self.create_node(node))
+
+        # 停止加载动画
+        self.chatbox.stop_loading()
+
+        return nodes
+    
+    
+    def on_AI_menu(self):
+        self.chatbox = CustomAIchatbox()
+        # 用户按下按钮后，触发chat_with_ai函数，并加载loading动画
+        self.chatbox.text_submit.connect(self.chatbox.start_loading)
+        self.chatbox.text_submit.connect(lambda text: self.chat_with_ai(text))
+        self.chatbox.show()
+        self.chatbox.show_chatbox(self.widget.geometry())
+
 
 ############################################################################################################
 ##所有节点列表
@@ -203,16 +283,33 @@ class OutputResistivityPlotNodeWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super(OutputResistivityPlotNodeWidget, self).__init__(parent)
         ## 设置图片说明
-        self.label_title = QtWidgets.QLabel('Apparent Resistivity Plot')
+        self.label_title = QtWidgets.QLabel('Apparent Resistivity Plot: Not Available')
         self.label_title.setStyleSheet("color: white;")  # 设置字体颜色为白色
-        ## 准备图片需要嵌入的widget
-        self.plotbrowser = QWebEngineView()
+
+        ## 设置台站的上下键
+        self.btn_up = QtWidgets.QPushButton('Up')
+        self.btn_down = QtWidgets.QPushButton('Down')
+
+        ## 准备图片需要嵌入的 widget
+        self.plotbrowser = QWebEngineView(self)
+        self.plotbrowser.setFixedHeight(500)
+        self.plotbrowser.setFixedWidth(800)
         html = ""
         self.plotbrowser.setHtml(html)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.label_title)
+        layout.addWidget(self.btn_up)
+        layout.addWidget(self.btn_down)
         layout.addWidget(self.plotbrowser)
         layout.addStretch()
+
+    def closeEvent(self, event):
+        """
+        在窗口关闭时释放 QWebEngineView
+        """
+        self.plotbrowser.deleteLater()
+        super(OutputResistivityPlotNodeWidget, self).closeEvent(event)
 
 class OutputResistivityPlotNodeWrapper(NodeBaseWidget):
     def __init__(self, parent=None, MTnode=None):
@@ -220,25 +317,39 @@ class OutputResistivityPlotNodeWrapper(NodeBaseWidget):
         self.set_name('outputplot')
         self.set_label('OutputPlot')
         self.MTnode = MTnode
+        self.plotbrowser = None  # 初始化 plotbrowser
         self.set_custom_widget(OutputResistivityPlotNodeWidget())
         self.wire_signals()
 
-    def wire_signals(self):
-        self.MTnode.finished.connect(self.update_plot)
-
+    def __del__(self):
+        """
+        确保在对象销毁时释放 QWebEngineView
+        """
+        if self.plotbrowser:
+            self.plotbrowser.deleteLater()
+    
     def get_value(self):
         pass
-    
-    def set_value(self, value):
+
+    def set_value(self,value):
         pass
 
-    def update_plot(self):
+    def wire_signals(self):
+        self.get_custom_widget().btn_up.clicked.connect(partial(self.change_site_index_and_execute, 1))
+        self.get_custom_widget().btn_down.clicked.connect(partial(self.change_site_index_and_execute, -1))
+        self.MTnode.finished.connect(self.update_plot)
+
+    def change_site_index_and_execute(self, index):
+        self.MTnode.site_index = index + self.MTnode.site_index
+        self.MTnode.execute_and_emit()
+
+    def update_plot(self, include_plotlyjs='directory'):
         fig = self.MTnode.restorefigure
-        print('fig generated')
-        html = plot(fig, output_type='div', include_plotlyjs='cdn', config={'displayModeBar': False}, image_width=1200, image_height=800)
-        print('html generated')
-        self.get_custom_widget().plotbrowser.setHtml(html)
-        print('html set')
+        html = plot(fig, output_type='div', include_plotlyjs=include_plotlyjs, config={'displayModeBar': False}, image_width=1200, image_height=800)
+        # 获取当前路径
+        path = os.path.abspath('plotly.min.js')
+        self.get_custom_widget().plotbrowser.setHtml(html, QtCore.QUrl.fromLocalFile(path))
+        self.get_custom_widget().label_title.setText('Apparent Resistivity Plot: Preparing...')
 
 class OutputResistivityPlotNodeUI(BaseNode):
     NODE_NAME = 'Outputplot'
@@ -254,6 +365,16 @@ class OutputResistivityPlotNodeUI(BaseNode):
         # add custom widget to node with "node.view" as the parent.
         node_widget = OutputResistivityPlotNodeWrapper(self.view, self.MTnode)
         self.add_custom_widget(node_widget, tab='Custom')
+        self.plotbrowser = node_widget.get_custom_widget().plotbrowser
+
+
+def cleanup_webengine_views(node_graph):
+    """
+    清理所有 QWebEngineView 实例
+    """
+    for node in node_graph.all_nodes():
+        if hasattr(node, 'plotbrowser') and node.plotbrowser:
+            node.plotbrowser.deleteLater()
 
 
 
@@ -270,6 +391,9 @@ if __name__ == '__main__':
 
     # get the main context menu.
     context_menu = node_graph.get_context_menu('graph')
+
+    # 添加AI菜单
+    AI_menu = context_menu.add_command('AI', node_graph.on_AI_menu, 'Shift+A')
 
     # 添加图菜单
     Run_menu = context_menu.add_menu('Run')
@@ -327,9 +451,10 @@ if __name__ == '__main__':
 
 
     node_graph.widget.show()
-    node_input = node_graph.create_node('InputFileNode.InputFileNodeUI', name='Node_InputDAT_MT')
-    node_phase = node_graph.create_node('PhaseTensorNode.PhaseTensorNodeUI', name='Node_Phase_MT')
-    node_apparent = node_graph.create_node('ApparentResistivityNode.ApparentResistivityNodeUI', name='Node_Apparent_MTDAT')
-    node_output = node_graph.create_node('OutputResistivityPlotNode.OutputResistivityPlotNodeUI', name='Node_Output_MTDAT')
-
+    # node_input = node_graph.create_node('InputFileNode.InputFileNodeUI', name='Node_InputDAT_MT')
+    # node_phase = node_graph.create_node('PhaseTensorNode.PhaseTensorNodeUI', name='Node_Phase_MT')
+    # node_apparent = node_graph.create_node('ApparentResistivityNode.ApparentResistivityNodeUI', name='Node_Apparent_MTDAT')
+    # node_output = node_graph.create_node('OutputResistivityPlotNode.OutputResistivityPlotNodeUI', name='Node_Output_MTDAT')
+    app.aboutToQuit.connect(lambda: cleanup_webengine_views(node_graph))
+    app.aboutToQuit.connect(lambda: node_graph.chatbox.close())
     app.exec()
